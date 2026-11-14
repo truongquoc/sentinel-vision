@@ -1,28 +1,26 @@
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field
 from typing import Any
 
-@dataclass
-class Detection:
-    label: str
-    confidence: float
-    box: tuple[float, float, float, float]  # x1, y1, x2, y2 pixels
+Box = tuple[float, float, float, float]  # x1, y1, x2, y2 in pixels
 
-@dataclass
-class TrackedObject:
+
+@dataclass(frozen=True)
+class Track:
+    """An object the tracker has confirmed in the current frame."""
+
     track_id: int
     label: str
     confidence: float
-    box: tuple[float, float, float, float]
-    age: int
-    first_seen: datetime
-    last_seen: datetime
+    box: Box
 
-@dataclass
+
+@dataclass(frozen=True)
 class EventCandidate:
     rule_id: str
-    event_type: str
+    rule_name: str
+    event_type: str  # zone_enter | loitering | zone_exit
     severity: str
     track_id: int
     label: str
-    details: dict[str, Any]
+    box: Box | None
+    details: dict[str, Any] = field(default_factory=dict)
