@@ -3,8 +3,11 @@
 Self-hosted AI detection for RTSP cameras, built first for the Imou Bullet 2C. Everything runs on your own
 machine: no cloud, no subscription.
 
-**Phase 1 (this release): the detector.** Detects people, vehicles and animals, follows each one with a
-stable ID, and records an event when an object enters a zone you draw, stays too long, or leaves.
+- **Phase 1: the detector.** Detects people, vehicles and animals, follows each one with a stable ID, and
+  records an event when an object enters a zone you draw, stays too long, or leaves.
+- **Phase 2: AI descriptions.** A local vision-language model (Ollama) describes what the object looks like,
+  what it is doing and what it carries, with a concern level. While someone stays in a zone, it posts a fresh
+  "what are they doing now" update every few seconds.
 
 ## Quick start (macOS / Apple Silicon)
 
@@ -14,6 +17,9 @@ uv venv --python 3.12 .venv     # or python3.12 -m venv .venv
 uv pip install -r requirements-dev.txt
 .venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
+
+For AI descriptions, install the model once: `ollama pull qwen3-vl:8b` (about 6 GB). Without it, everything
+else works and the dashboard's **AI DESCRIPTIONS** card shows the command to run.
 
 Open http://localhost:8000, wait for **ONLINE**, then click **+ Draw zone** and click the corners of the area
 you care about on the live image.
@@ -51,9 +57,34 @@ FastAPI                  REST API, MJPEG live view, dashboard
     create exit/enter pairs.
 - **Media:** each event stores an annotated full-frame snapshot plus a tight crop of the object. The crop is
   what a vision-language model will describe in phase 2.
+- **Descriptions:** see the next section.
 - **Retention:** events and media older than `EVENT_RETENTION_DAYS` are purged hourly.
 
 Measured on an M4 with `yolo11s.pt` at 640×480: about 38 ms inference, steady 8 fps (the configured cap).
+
+## AI descriptions
+
+```
+event saved (status: pending) ──► description queue ──► Ollama /api/chat (crop + full frame, JSON schema)
+        │                              │                         │
+        └─ webhook held ≤ NOTIFY_WAIT ─┴──── description stored ─┴──► webhook sent with "description"
+```
+
+- **What is described:** `zone_enter` and `loitering` events, plus periodic `activity` updates every
+  `describe_every_seconds` (per zone, default 20, 0 = off) while an object stays inside. `zone_exit` is not
+  described, because the object has already left the frame.
+- **What the model sees:** a tight crop of the object for detail, and the whole frame (≤768 px wide) for
+  context. Activity updates include the previous summary, so the model reports what changed.
+- **Output:** a fixed JSON schema enforced through Ollama's structured outputs:
+  `summary`, `appearance`, `action`, `carrying[]`, `concern` (none/low/medium/high) and `concern_reason`.
+  The prompt forbids guessing identity, age or ethnicity.
+- **Never blocks detection:** one worker thread serves a bounded queue. A newer activity request for the same
+  object replaces an older queued one. If the model fails or is missing, the event is marked `failed` and the
+  alert still goes out.
+- **Re-run:** `POST /api/events/{id}/describe`, or the *Describe again* button. Useful after installing the
+  model. It does not re-send the webhook.
+
+The describer is behind a small interface (`app/pipeline/describer.py`), so a cloud model can be added later.
 
 ## API
 
@@ -67,13 +98,15 @@ Measured on an M4 with `yolo11s.pt` at 640×480: about 38 ms inference, steady 8
 | GET | `/api/events?event_type=&label=&unacknowledged=&limit=` | event ledger |
 | GET | `/api/events/{id}` · `/snapshot` · `/thumbnail` | event detail & media |
 | POST | `/api/events/{id}/ack` | acknowledge |
+| POST | `/api/events/{id}/describe` | re-run the AI description |
 
 Zone rule body:
 
 ```json
 {"camera_id": "front-door", "name": "Front gate",
  "config": {"polygon": [[0.1,0.5],[0.9,0.5],[0.9,1],[0.1,1]], "classes": ["person"],
-            "events": ["enter", "loiter"], "loiter_seconds": 30, "severity": "medium"}}
+            "events": ["enter", "loiter"], "loiter_seconds": 30, "severity": "medium",
+            "describe_every_seconds": 20}}
 ```
 
 Webhooks are POSTed as JSON with `X-Sentinel-Signature: sha256=<hmac>` when `WEBHOOK_SECRET` is set.
@@ -89,7 +122,6 @@ To try it without a camera, set `CAMERA_RTSP_URL` to a local video file. It loop
 
 ## Not yet (next phases)
 
-- AI descriptions of what a person in a zone is doing (local VLM via Ollama)
 - Phone push notifications
 - go2rtc for full-resolution, low-latency live view (H.265 main stream)
 - Continuous recording / clips

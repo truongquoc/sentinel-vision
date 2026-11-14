@@ -3,6 +3,7 @@ from fastapi.testclient import TestClient
 
 from app.core.config import Settings
 from app.main import create_app
+from app.pipeline.describer import NullDescriber
 from app.pipeline.detectors import NullTracker
 
 POLYGON = [[0.1, 0.5], [0.9, 0.5], [0.9, 1.0], [0.1, 1.0]]
@@ -11,7 +12,7 @@ POLYGON = [[0.1, 0.5], [0.9, 0.5], [0.9, 1.0], [0.1, 1.0]]
 @pytest.fixture
 def client(tmp_path):
     config = Settings(data_dir=tmp_path, camera_id="cam-1", camera_rtsp_url="", detector="null", webhook_url="")
-    with TestClient(create_app(config, tracker_factory=NullTracker, autostart=False)) as c:
+    with TestClient(create_app(config, tracker_factory=NullTracker, autostart=False, describer=NullDescriber())) as c:
         yield c
 
 
@@ -56,3 +57,16 @@ def test_missing_event_media_is_404(client):
 
 def test_live_endpoints_require_started_camera(client):
     assert client.get("/api/cameras/cam-1/snapshot").status_code == 409
+
+
+def test_new_zone_describes_activity_every_20s_by_default(client):
+    rule = client.post("/api/rules", json={"camera_id": "cam-1", "name": "Gate", "config": {"polygon": POLYGON}}).json()
+    assert rule["config"]["describe_every_seconds"] == 20
+
+
+def test_redescribe_unknown_event_is_404(client):
+    assert client.post("/api/events/nope/describe").status_code == 404
+
+
+def test_health_reports_describer(client):
+    assert client.get("/api/health").json()["describer"]["enabled"] is False

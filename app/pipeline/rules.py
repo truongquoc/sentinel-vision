@@ -5,6 +5,7 @@ For every (rule, track) pair the engine remembers whether the object is inside t
     outside --(inside for min_frames)--> inside   emits zone_enter
     inside  --(dwell >= loiter_seconds)--> inside  emits loitering (once per visit)
     inside  --(outside/lost for exit_grace)--> gone emits zone_exit
+    inside  --(every describe_every_seconds)--> inside emits activity (for the AI describer)
 
 Requiring a few consecutive frames to enter, and a grace period to leave, stops a box that
 jitters across the zone edge from producing a stream of enter/exit pairs.
@@ -15,7 +16,7 @@ from typing import Any
 from app.core.types import EventCandidate, Track
 from app.pipeline.geometry import Point, ground_point, point_in_polygon
 
-EVENT_TYPES = {"enter": "zone_enter", "loiter": "loitering", "exit": "zone_exit"}
+EVENT_TYPES = {"enter": "zone_enter", "loiter": "loitering", "exit": "zone_exit", "activity": "activity"}
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,7 @@ class ZoneRule:
     loiter_seconds: float | None = None
     min_frames: int = 2
     exit_grace_seconds: float = 2.0
+    describe_every_seconds: float = 0.0  # 0 disables periodic activity events
 
     @classmethod
     def from_record(cls, record: dict[str, Any]) -> "ZoneRule":
@@ -43,6 +45,7 @@ class ZoneRule:
             loiter_seconds=cfg.get("loiter_seconds"),
             min_frames=int(cfg.get("min_frames", 2)),
             exit_grace_seconds=float(cfg.get("exit_grace_seconds", 2.0)),
+            describe_every_seconds=float(cfg.get("describe_every_seconds") or 0.0),
         )
 
     def watches(self, label: str) -> bool:
@@ -56,6 +59,7 @@ class _Occupancy:
     entered_at: float | None = None
     last_inside_at: float = 0.0
     loiter_emitted: bool = False
+    last_activity_at: float = 0.0
     last_box: tuple | None = None
 
 
@@ -96,14 +100,28 @@ class RuleEngine:
         occ.last_box = track.box
         if occ.entered_at is None and occ.frames_inside >= rule.min_frames:
             occ.entered_at = now
+            occ.last_activity_at = now
             return self._emit(rule, "enter", track.track_id, occ, {"confidence": round(track.confidence, 3)})
-        if occ.entered_at is None or occ.loiter_emitted or rule.loiter_seconds is None:
+        if occ.entered_at is None:
+            return []
+        return self._check_loiter(rule, track, occ, now) + self._check_activity(rule, track, occ, now)
+
+    def _check_loiter(self, rule: ZoneRule, track: Track, occ: _Occupancy, now: float) -> list[EventCandidate]:
+        if occ.loiter_emitted or rule.loiter_seconds is None:
             return []
         dwell = now - occ.entered_at
         if dwell < rule.loiter_seconds:
             return []
         occ.loiter_emitted = True
+        occ.last_activity_at = now  # the loiter event gets described too; restart the activity clock
         return self._emit(rule, "loiter", track.track_id, occ, {"dwell_seconds": round(dwell, 1)})
+
+    def _check_activity(self, rule: ZoneRule, track: Track, occ: _Occupancy, now: float) -> list[EventCandidate]:
+        if rule.describe_every_seconds <= 0 or now - occ.last_activity_at < rule.describe_every_seconds:
+            return []
+        occ.last_activity_at = now
+        details = {"dwell_seconds": round(now - occ.entered_at, 1)}
+        return [EventCandidate(rule.id, rule.name, EVENT_TYPES["activity"], rule.severity, track.track_id, occ.label, occ.last_box, details)]
 
     def _observe_absent(self, rule: ZoneRule, key: tuple[str, int], now: float) -> list[EventCandidate]:
         occ = self._state[key]

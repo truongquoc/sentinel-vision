@@ -19,9 +19,11 @@ from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.types import EventCandidate, Track
 from app.pipeline.annotate import crop, draw_highlight, draw_tracks
+from app.pipeline.describer import DescriptionRequest
 from app.pipeline.detectors import ObjectTracker, make_tracker
 from app.pipeline.rules import RuleEngine, ZoneRule
 from app.services.camera import CameraReader
+from app.services.descriptions import DescriptionService
 from app.services.notifier import WebhookNotifier
 from app.services.store import Store
 
@@ -29,6 +31,14 @@ log = get_logger(__name__)
 
 TrackerFactory = Callable[[], ObjectTracker]
 JPEG_QUALITY = [cv2.IMWRITE_JPEG_QUALITY, 80]
+CONTEXT_MAX_WIDTH = 768  # full-frame context image for the VLM; detail comes from the crop
+
+
+def downscale(image: np.ndarray, max_width: int) -> np.ndarray:
+    height, width = image.shape[:2]
+    if width <= max_width:
+        return image
+    return cv2.resize(image, (max_width, int(height * max_width / width)), interpolation=cv2.INTER_AREA)
 
 
 def encode_jpeg(image: np.ndarray) -> bytes | None:
@@ -40,8 +50,9 @@ def encode_jpeg(image: np.ndarray) -> bytes | None:
 
 class CameraPipeline:
     def __init__(self, camera: dict[str, Any], reader: CameraReader, tracker: ObjectTracker, store: Store,
-                 notifier: WebhookNotifier, media_dir: Path, fps: float) -> None:
+                 notifier: WebhookNotifier, media_dir: Path, fps: float, descriptions: DescriptionService | None = None) -> None:
         self.camera_id = camera["id"]
+        self.descriptions = descriptions
         self.reader = reader
         self.tracker = tracker
         self.store = store
@@ -138,11 +149,19 @@ class CameraPipeline:
         self.live_seq += 1
 
     def _record(self, candidate: EventCandidate, raw: np.ndarray, annotated: np.ndarray, captured_at: float) -> None:
+        describing = self.descriptions is not None and self.descriptions.enabled
+        if candidate.event_type == "activity" and not describing:
+            return  # activity events exist only to carry a description
+        # On exit the object has already left the frame: its last box would crop empty background.
+        present = candidate.event_type != "zone_exit"
         event_id = str(uuid.uuid4())
-        snapshot = draw_highlight(annotated.copy(), candidate.box, f"{candidate.label} #{candidate.track_id}")
+        snapshot = annotated.copy()
+        if present:
+            snapshot = draw_highlight(snapshot, candidate.box, f"{candidate.label} #{candidate.track_id}")
         snapshot_path = self._write_media(f"{event_id}.jpg", snapshot)
-        thumbnail = crop(raw, candidate.box)
+        thumbnail = crop(raw, candidate.box) if present else None
         thumbnail_path = self._write_media(f"{event_id}_thumb.jpg", thumbnail) if thumbnail is not None else None
+        describe = describing and thumbnail_path is not None
         event = {
             "id": event_id,
             "camera_id": self.camera_id,
@@ -155,6 +174,7 @@ class CameraPipeline:
             "snapshot_path": snapshot_path,
             "thumbnail_path": thumbnail_path,
             "occurred_at": datetime.fromtimestamp(captured_at, timezone.utc).isoformat(),
+            "description_status": "pending" if describe else None,
         }
         self.store.add_event(event)
         log.info(
@@ -162,7 +182,29 @@ class CameraPipeline:
             camera_id=self.camera_id,
             event_context={"uuid": event_id, "type": candidate.event_type, "rule_uuid": candidate.rule_id},
         )
-        self.notifier.enqueue(event)
+        if not describe:
+            self.notifier.enqueue(event)
+            return
+        self._request_description(event, candidate, thumbnail, raw)
+
+    def _request_description(self, event: dict[str, Any], candidate: EventCandidate, thumbnail: np.ndarray, raw: np.ndarray) -> None:
+        crop_jpeg = encode_jpeg(thumbnail)
+        frame_jpeg = encode_jpeg(downscale(raw, CONTEXT_MAX_WIDTH))
+        if crop_jpeg is None or frame_jpeg is None:
+            self.store.set_description(event["id"], "failed", {"error": "Could not encode images"})
+            self.notifier.enqueue(event)
+            return
+        track_key = (self.camera_id, candidate.rule_id, candidate.track_id)
+        request = DescriptionRequest(
+            crop_jpeg=crop_jpeg,
+            frame_jpeg=frame_jpeg,
+            label=candidate.label,
+            zone_name=candidate.rule_name,
+            event_type=candidate.event_type,
+            dwell_seconds=candidate.details.get("dwell_seconds"),
+            previous_summary=self.descriptions.previous_summary(track_key),
+        )
+        self.descriptions.submit(event, request, track_key)
 
     def _write_media(self, filename: str, image: np.ndarray) -> str | None:
         if not cv2.imwrite(str(self.media_dir / filename), image, JPEG_QUALITY):
@@ -172,9 +214,11 @@ class CameraPipeline:
 
 
 class SurveillanceEngine:
-    def __init__(self, store: Store, notifier: WebhookNotifier, settings: Settings, tracker_factory: TrackerFactory | None = None) -> None:
+    def __init__(self, store: Store, notifier: WebhookNotifier, settings: Settings, tracker_factory: TrackerFactory | None = None,
+                 descriptions: DescriptionService | None = None) -> None:
         self.store = store
         self.notifier = notifier
+        self.descriptions = descriptions
         self.settings = settings
         self.media_dir = settings.data_dir / "media"
         self.media_dir.mkdir(parents=True, exist_ok=True)
@@ -195,7 +239,8 @@ class SurveillanceEngine:
             tracker = self._tracker_factory()
             self._detector_status = {"name": tracker.name, "ready": tracker.ready, "detail": tracker.detail}
             reader = CameraReader(camera_id, camera["rtsp_url"], self.settings.stream_timeout_seconds)
-            pipeline = CameraPipeline(camera, reader, tracker, self.store, self.notifier, self.media_dir, self.settings.inference_fps)
+            pipeline = CameraPipeline(camera, reader, tracker, self.store, self.notifier, self.media_dir,
+                                      self.settings.inference_fps, self.descriptions)
             self.pipelines[camera_id] = pipeline
         pipeline.start()
         return pipeline
@@ -226,6 +271,27 @@ class SurveillanceEngine:
             "last_frame_at": reader.last_frame_at,
             "frame_size": reader.frame_size,
         } | pipeline.status()
+
+    def redescribe(self, event: dict[str, Any]) -> str | None:
+        """Queue a fresh description for a stored event. Returns an error message, or None when queued."""
+        if self.descriptions is None or not self.descriptions.enabled:
+            return "Descriptions are disabled"
+        if not event.get("thumbnail_path") or not event.get("snapshot_path"):
+            return "Event has no object image to describe"
+        crop_path, frame_path = self.media_dir / event["thumbnail_path"], self.media_dir / event["snapshot_path"]
+        if not crop_path.exists() or not frame_path.exists():
+            return "Event media has expired"
+        request = DescriptionRequest(
+            crop_jpeg=crop_path.read_bytes(),
+            frame_jpeg=frame_path.read_bytes(),
+            label=event["label"],
+            zone_name=event["details"].get("rule_name", "zone"),
+            event_type=event["event_type"],
+            dwell_seconds=event["details"].get("dwell_seconds"),
+        )
+        self.store.set_description(event["id"], "pending", None)
+        self.descriptions.submit(event, request, (event["camera_id"], event["rule_id"], event["track_id"]), notify=False)
+        return None
 
     def purge_old_media(self) -> int:
         files = self.store.purge_events_older_than(self.settings.event_retention_days)

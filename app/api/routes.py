@@ -25,6 +25,7 @@ class ZoneConfig(BaseModel):
     severity: Literal["low", "medium", "high"] = "medium"
     min_frames: int = Field(default=2, ge=1, le=30)
     exit_grace_seconds: float = Field(default=2.0, ge=0, le=60)
+    describe_every_seconds: float = Field(default=20.0, ge=0, le=3600)  # 0 = no periodic AI activity updates
 
 
 class RuleIn(BaseModel):
@@ -72,6 +73,7 @@ def health(request: Request) -> dict:
         "cameras": [engine.camera_status(c) for c in store.cameras()],
         "events_today": store.count_events_since(midnight),
         "notifier": {"enabled": notifier.enabled, "delivered": notifier.delivered, "failed": notifier.failed},
+        "describer": engine.descriptions.status() if engine.descriptions else {"enabled": False},
     }
 
 
@@ -179,6 +181,17 @@ def acknowledge_event(event_id: str, request: Request) -> dict:
         raise HTTPException(404, "Event not found")
     store.acknowledge(event_id)
     return {"ok": True}
+
+
+@router.post("/events/{event_id}/describe", status_code=202)
+def redescribe_event(event_id: str, request: Request) -> dict:
+    event = _store(request).event(event_id)
+    if event is None:
+        raise HTTPException(404, "Event not found")
+    error = _engine(request).redescribe(event)
+    if error is not None:
+        raise HTTPException(409, error)
+    return {"ok": True, "status": "pending"}
 
 
 @router.get("/events/{event_id}/snapshot")

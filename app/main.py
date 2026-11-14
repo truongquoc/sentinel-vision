@@ -8,6 +8,8 @@ from fastapi.staticfiles import StaticFiles
 from app.api.routes import router
 from app.core.config import Settings, settings
 from app.core.logging import configure_logging, get_logger
+from app.pipeline.describer import Describer, make_describer
+from app.services.descriptions import DescriptionService
 from app.services.engine import SurveillanceEngine, TrackerFactory
 from app.services.notifier import WebhookNotifier
 from app.services.store import Store
@@ -25,7 +27,8 @@ async def retention_loop(engine: SurveillanceEngine) -> None:
         await asyncio.sleep(RETENTION_INTERVAL_SECONDS)
 
 
-def create_app(config: Settings = settings, tracker_factory: TrackerFactory | None = None, autostart: bool = True) -> FastAPI:
+def create_app(config: Settings = settings, tracker_factory: TrackerFactory | None = None, autostart: bool = True,
+               describer: Describer | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         configure_logging(config.log_format)
@@ -33,7 +36,10 @@ def create_app(config: Settings = settings, tracker_factory: TrackerFactory | No
         store.upsert_camera(config.camera_id, config.camera_name, config.camera_rtsp_url)
         notifier = WebhookNotifier(config.webhook_url, config.webhook_secret)
         notifier.start()
-        engine = SurveillanceEngine(store, notifier, config, tracker_factory)
+        vlm = describer or make_describer(config.describer, config.ollama_url, config.vlm_model, config.describe_timeout_seconds)
+        descriptions = DescriptionService(vlm, store, notifier, config.notify_wait_seconds)
+        descriptions.start()
+        engine = SurveillanceEngine(store, notifier, config, tracker_factory, descriptions)
         app.state.store, app.state.engine, app.state.settings = store, engine, config
         if autostart and config.camera_rtsp_url:
             engine.start_camera(config.camera_id)
@@ -41,6 +47,7 @@ def create_app(config: Settings = settings, tracker_factory: TrackerFactory | No
         yield
         retention.cancel()
         engine.stop()
+        descriptions.stop()
         notifier.stop()
         store.close()
 

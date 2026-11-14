@@ -31,6 +31,7 @@
     <article><label>CAMERA</label><strong id="cameraState" data-testid="camera-state">—</strong><small id="cameraMeta">Awaiting source</small></article>
     <article><label>DETECTOR</label><strong id="detectorState" data-testid="detector-state">—</strong><small id="detectorMeta">Checking…</small></article>
     <article><label>PIPELINE</label><strong id="pipelineState" data-testid="pipeline-state">—</strong><small id="pipelineMeta">fps · inference latency</small></article>
+    <article><label>AI DESCRIPTIONS</label><strong id="describerState" data-testid="describer-state">—</strong><small id="describerMeta">Checking…</small></article>
     <article><label>EVENTS TODAY</label><strong id="eventCount" data-testid="events-today">0</strong><small id="notifierMeta">Webhook disabled</small></article>
   </section>
 
@@ -73,6 +74,7 @@
           <option value="zone_enter">Entered zone</option>
           <option value="loitering">Loitering</option>
           <option value="zone_exit">Left zone</option>
+          <option value="activity">Activity updates</option>
         </select>
         <select id="filterLabel" data-testid="filter-label"><option value="">All objects</option></select>
         <label class="toggle"><input type="checkbox" id="filterUnacked" data-testid="filter-unacked"> Unacknowledged</label>
@@ -96,6 +98,9 @@
     </fieldset>
     <div class="row">
       <label>Loiter after (seconds)<input name="loiter" type="number" min="1" max="3600" value="30" data-testid="rule-loiter"></label>
+      <label>AI update every (s, 0 = off)<input name="describeEvery" type="number" min="0" max="3600" value="20" data-testid="rule-describe-every"></label>
+    </div>
+    <div class="row">
       <label>Severity<select name="severity" data-testid="rule-severity"><option>low</option><option selected>medium</option><option>high</option></select></label>
     </div>
     <p class="form-error" id="ruleError" data-testid="rule-error"></p>
@@ -107,7 +112,7 @@
   <form method="dialog">
     <img id="eventImage" alt="Event snapshot">
     <div id="eventInfo"></div>
-    <menu><button value="close" data-testid="event-close">Close</button></menu>
+    <menu><button type="button" class="ghost" id="redescribe" data-testid="event-redescribe">Describe again</button><button value="close" data-testid="event-close">Close</button></menu>
   </form>
 </dialog>
 

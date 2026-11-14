@@ -1,7 +1,7 @@
 const $ = (s) => document.querySelector(s);
 const SVGNS = 'http://www.w3.org/2000/svg';
 const CLASSES = ['person', 'car', 'truck', 'motorcycle', 'bicycle', 'bus', 'dog', 'cat'];
-const EVENT_NAMES = { zone_enter: 'entered', loitering: 'is loitering in', zone_exit: 'left' };
+const EVENT_NAMES = { zone_enter: 'entered', loitering: 'is loitering in', zone_exit: 'left', activity: 'update ·' };
 const COLORS = ['#4fd18b', '#f2b84b', '#6aa9ff', '#ef6f6c', '#c48af5', '#4dd0d4'];
 
 const state = { camera: null, rules: [], drawing: null, editing: null, streaming: false, labels: new Set() };
@@ -42,12 +42,25 @@ async function refreshHealth() {
   $('#pipelineState').textContent = cam.running ? `${cam.processing_fps ?? 0} fps` : '—';
   $('#pipelineMeta').textContent = cam.running ? `${cam.inference_ms ?? '–'} ms inference · ${cam.active_tracks ?? 0} tracked` : 'Idle';
   $('#eventCount').textContent = health.events_today;
+  renderDescriberStatus(health.describer || { enabled: false });
   const n = health.notifier;
   $('#notifierMeta').textContent = n.enabled ? `Webhook: ${n.delivered} sent · ${n.failed} failed` : 'Webhook disabled';
   $('#subline').textContent = cam.pipeline_error ? `Pipeline error: ${cam.pipeline_error}` : 'Local AI processing · edge node';
   if (cam.frame_size) $('#video').style.aspectRatio = `${cam.frame_size[0]} / ${cam.frame_size[1]}`;
   updateFeed(cam);
   renderRuleOccupancy(cam.zone_occupancy || {});
+}
+
+function renderDescriberStatus(d) {
+  if (!d.enabled) {
+    $('#describerState').textContent = 'OFF';
+    $('#describerMeta').textContent = d.detail || 'DESCRIBER=null';
+    return;
+  }
+  $('#describerState').textContent = d.ready ? 'READY' : 'NOT READY';
+  const queue = d.pending ? ` · ${d.pending} queued` : '';
+  $('#describerMeta').textContent = d.ready ? `${d.detail}${queue} · ${d.completed} done` : d.detail;
+  $('#describerMeta').title = d.detail;
 }
 
 function updateFeed(cam) {
@@ -138,12 +151,13 @@ function openRuleDialog(rule, polygon) {
   state.editing = { rule, polygon: polygon || rule.config.polygon };
   $('#ruleDialogTitle').textContent = rule ? 'Edit zone' : 'New zone';
   $('#ruleError').textContent = '';
-  const cfg = rule?.config ?? { classes: ['person'], events: ['enter', 'loiter'], loiter_seconds: 30, severity: 'medium' };
+  const cfg = rule?.config ?? { classes: ['person'], events: ['enter', 'loiter'], loiter_seconds: 30, severity: 'medium', describe_every_seconds: 20 };
   f.name.value = rule?.name ?? `Zone ${state.rules.length + 1}`;
   f.querySelectorAll('[name=cls]').forEach((el) => { el.checked = cfg.classes.includes(el.value); });
   f.querySelectorAll('[name=ev]').forEach((el) => { el.checked = cfg.events.includes(el.value); });
   f.loiter.value = cfg.loiter_seconds ?? 30;
   f.severity.value = cfg.severity;
+  f.describeEvery.value = cfg.describe_every_seconds ?? 0;
   $('#ruleDialog').showModal();
 }
 
@@ -158,6 +172,7 @@ $('#ruleForm').addEventListener('submit', async (e) => {
     events,
     loiter_seconds: events.includes('loiter') ? Number(f.loiter.value) : null,
     severity: f.severity.value,
+    describe_every_seconds: Number(f.describeEvery.value || 0),
   };
   const { rule } = state.editing;
   try {
@@ -186,7 +201,7 @@ async function refreshRules() {
       <span class="dot" style="background:${color(i)}"></span>
       <div class="rule-main">
         <b>${esc(r.name)}</b>
-        <small>${esc(r.config.classes.join(', ') || 'all objects')} · ${esc(r.config.events.join(' / '))}${r.config.loiter_seconds ? ` · loiter ${r.config.loiter_seconds}s` : ''}</small>
+        <small>${esc(r.config.classes.join(', ') || 'all objects')} · ${esc(r.config.events.join(' / '))}${r.config.loiter_seconds ? ` · loiter ${r.config.loiter_seconds}s` : ''}${r.config.describe_every_seconds ? ` · AI every ${r.config.describe_every_seconds}s` : ''}</small>
       </div>
       <span class="occ" data-occ="${r.id}" title="Objects inside now"></span>
       <button class="chip-btn" data-act="toggle" data-testid="rule-toggle">${r.enabled ? 'ARMED' : 'PAUSED'}</button>
@@ -236,7 +251,23 @@ async function refreshEvents() {
   const events = await api('/events?' + q);
   events.forEach((e) => e.label && state.labels.add(e.label));
   syncLabelFilter();
-  $('#eventList').innerHTML = events.length ? events.map(renderEvent).join('') : '<p class="muted">No events match.</p>';
+  // Re-rendering moves rows under the cursor; only do it when something changed and no dialog is open.
+  const html = events.length ? events.map(renderEvent).join('') : '<p class="muted">No events match.</p>';
+  if (html === state.eventsHtml || document.querySelector('dialog[open]')) return;
+  state.eventsHtml = html;
+  $('#eventList').innerHTML = html;
+}
+
+function renderDescription(e) {
+  const d = e.description;
+  if (e.description_status === 'pending') return '<p class="desc pending">Describing…</p>';
+  if (e.description_status === 'done' && d) {
+    return `<p class="desc"><span class="concern ${esc(d.concern)}" title="${esc(d.concern_reason)}">${esc(d.concern)}</span>${esc(d.summary)}</p>`;
+  }
+  if (e.description_status === 'failed' || e.description_status === 'skipped') {
+    return `<p class="desc failed" title="${esc(d?.error)}">No description (${esc(e.description_status)})</p>`;
+  }
+  return '';
 }
 
 function renderEvent(e) {
@@ -245,15 +276,30 @@ function renderEvent(e) {
   const img = e.thumbnail_path || e.snapshot_path;
   const kind = e.thumbnail_path ? 'thumbnail' : 'snapshot';
   return `
-    <div class="event ${e.acknowledged_at ? 'acked' : ''}" data-event="${e.id}" data-testid="event-item">
+    <div class="event ${e.acknowledged_at ? 'acked' : ''} ${e.event_type === 'activity' ? 'activity' : ''}" data-event="${e.id}" data-testid="event-item">
       <div class="severity ${esc(e.severity)}"></div>
       ${img ? `<img src="/api/events/${e.id}/${kind}" alt="" loading="lazy" data-act="open">` : '<div class="noimg"></div>'}
       <div class="event-main" data-act="open">
         <b>${esc(e.label)} #${e.track_id} ${EVENT_NAMES[e.event_type] ?? esc(e.event_type)} <em>${esc(d.rule_name)}</em></b>
         <small>${when(e.occurred_at)}${dwell}</small>
+        ${renderDescription(e)}
       </div>
       <button data-act="ack" data-testid="event-ack" ${e.acknowledged_at ? 'disabled' : ''}>${e.acknowledged_at ? 'ACKED' : 'Acknowledge'}</button>
     </div>`;
+}
+
+function renderDescriptionDetail(ev) {
+  const d = ev.description;
+  if (ev.description_status !== 'done' || !d) return `<p class="muted">${ev.description_status ? `Description ${esc(ev.description_status)}${d?.error ? `: ${esc(d.error)}` : ''}` : 'Not described.'}</p>`;
+  const carrying = d.carrying?.length ? esc(d.carrying.join(', ')) : 'nothing visible';
+  return `<p class="lead">${esc(d.summary)}</p>
+    <dl class="desc-grid">
+      <dt>Doing</dt><dd>${esc(d.action)}</dd>
+      <dt>Looks like</dt><dd>${esc(d.appearance)}</dd>
+      <dt>Carrying</dt><dd>${carrying}</dd>
+      <dt>Concern</dt><dd><span class="concern ${esc(d.concern)}">${esc(d.concern)}</span> ${esc(d.concern_reason)}</dd>
+    </dl>
+    <small class="muted">${esc(d.model)} · ${d.latency_ms} ms</small>`;
 }
 
 function syncLabelFilter() {
@@ -267,13 +313,36 @@ $('#eventList').addEventListener('click', async (e) => {
   const id = e.target.closest('[data-event]')?.dataset.event;
   if (!act || !id) return;
   if (act === 'ack') { await api(`/events/${id}/ack`, { method: 'POST' }); return refreshEvents(); }
-  const ev = await api(`/events/${id}`);
-  $('#eventImage').src = `/api/events/${id}/snapshot`;
-  $('#eventInfo').innerHTML = `<h2>${esc(ev.label)} #${ev.track_id} ${EVENT_NAMES[ev.event_type] ?? ''} ${esc(ev.details.rule_name)}</h2>
-    <small>${when(ev.occurred_at)} · severity ${esc(ev.severity)}${ev.details.confidence ? ` · ${(ev.details.confidence * 100).toFixed(0)}% confidence` : ''}</small>`;
+  await openEvent(id);
   $('#eventDialog').showModal();
 });
-['#filterType', '#filterLabel', '#filterUnacked'].forEach((s) => { $(s).onchange = refreshEvents; });
+
+async function openEvent(id) {
+  const ev = await api(`/events/${id}`);
+  state.openEvent = id;
+  $('#eventImage').src = `/api/events/${id}/snapshot`;
+  $('#eventInfo').innerHTML = `<h2>${esc(ev.label)} #${ev.track_id} ${EVENT_NAMES[ev.event_type] ?? ''} ${esc(ev.details.rule_name)}</h2>
+    <small>${when(ev.occurred_at)} · severity ${esc(ev.severity)}${ev.details.confidence ? ` · ${(ev.details.confidence * 100).toFixed(0)}% confidence` : ''}</small>
+    ${renderDescriptionDetail(ev)}`;
+  $('#redescribe').hidden = !ev.thumbnail_path;
+  $('#redescribe').disabled = ev.description_status === 'pending';
+}
+
+$('#redescribe').onclick = async () => {
+  try {
+    await api(`/events/${state.openEvent}/describe`, { method: 'POST' });
+  } catch (err) {
+    $('#eventInfo').insertAdjacentHTML('beforeend', `<p class="form-error">${esc(err.message)}</p>`);
+    return;
+  }
+  await openEvent(state.openEvent);
+  const poll = setInterval(async () => {
+    if (!$('#eventDialog').open) return clearInterval(poll);
+    const ev = await api(`/events/${state.openEvent}`);
+    if (ev.description_status !== 'pending') { clearInterval(poll); openEvent(state.openEvent); refreshEvents(); }
+  }, 2000);
+};
+['#filterType', '#filterLabel', '#filterUnacked'].forEach((s) => { $(s).onchange = () => { state.eventsHtml = null; refreshEvents(); }; });
 
 // ---------------------------------------------------------------- boot
 async function boot() {
