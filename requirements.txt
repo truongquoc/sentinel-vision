@@ -1,0 +1,8 @@
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+opencv-python-headless==4.10.0.84
+# Keep compatible with package mirrors that do not yet carry NumPy 2.2 wheels.
+numpy>=1.26,<2.1
+httpx==0.28.1
+# AI inference. The first start downloads the configured YOLO model (~5 MB).
+ultralytics>=8.3,<9
