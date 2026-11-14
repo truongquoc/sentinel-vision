@@ -45,3 +45,16 @@ dialog.wide img{width:100%;border-radius:8px;display:block;margin-bottom:10px}
 [hidden]{display:none!important}
 .metrics{grid-template-columns:repeat(4,minmax(0,1fr))}
 .grid{grid-template-columns:minmax(0,1.55fr) minmax(0,1fr)}
+/* ---- phase 2: AI descriptions ---- */
+.metrics{grid-template-columns:repeat(5,minmax(0,1fr))}
+.desc{margin:5px 0 0;font-size:13px;color:#2c3a31;line-height:1.4;text-transform:none}
+.desc.pending{color:var(--muted);font-style:italic}
+.desc.failed{color:#9a7b6c;font-size:12px}
+.concern{display:inline-block;font:9px 'DM Mono';letter-spacing:.6px;text-transform:uppercase;padding:2px 6px;border-radius:20px;margin-right:6px;vertical-align:1px;background:#e7f2ea;color:#287451}
+.concern.low{background:#eef1f6;color:#4a5d7a}.concern.medium{background:#fff1d6;color:#9a6205}.concern.high{background:#fbe1de;color:#b5473a}
+.event.activity .severity{background:#9bb7a6;opacity:.6}
+.event.activity{padding:9px 0}
+.lead{font-size:16px;font-weight:600;margin:14px 0 8px}
+.desc-grid{display:grid;grid-template-columns:110px 1fr;gap:6px 10px;margin:0 0 10px;font-size:13px}
+.desc-grid dt{color:var(--muted);font-weight:600}.desc-grid dd{margin:0}
+@media(max-width:1100px){.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}

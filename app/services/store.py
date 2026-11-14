@@ -14,7 +14,7 @@ CREATE INDEX IF NOT EXISTS idx_events_camera_time ON events(camera_id, occurred_
 """
 
 MIGRATIONS = {
-    "events": {"thumbnail_path": "TEXT"},
+    "events": {"thumbnail_path": "TEXT", "description_status": "TEXT", "description": "TEXT"},
 }
 
 
@@ -101,11 +101,16 @@ class Store:
     # events ------------------------------------------------------------------
     def add_event(self, e: dict[str, Any]) -> None:
         self._write(
-            "INSERT INTO events (id, camera_id, rule_id, event_type, severity, track_id, label, details, snapshot_path, thumbnail_path, occurred_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO events (id, camera_id, rule_id, event_type, severity, track_id, label, details, snapshot_path, "
+            "thumbnail_path, occurred_at, description_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (e["id"], e["camera_id"], e["rule_id"], e["event_type"], e["severity"], e["track_id"], e["label"],
-             json.dumps(e["details"]), e.get("snapshot_path"), e.get("thumbnail_path"), e["occurred_at"]),
+             json.dumps(e["details"]), e.get("snapshot_path"), e.get("thumbnail_path"), e["occurred_at"], e.get("description_status")),
         )
+
+    def set_description(self, event_id: str, status: str, payload: dict[str, Any] | None) -> bool:
+        """status: pending | done | failed | skipped. payload is the description, or {"error": ...}."""
+        body = json.dumps(payload) if payload is not None else None
+        return self._write("UPDATE events SET description_status=?, description=? WHERE id=?", (status, body, event_id)) > 0
 
     def events(
         self,
@@ -115,14 +120,15 @@ class Store:
         unacknowledged: bool = False,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
-        clauses, args = [], []
+        # An activity update exists only to carry a description; without one it is noise.
+        clauses, args = ["NOT (event_type = 'activity' AND COALESCE(description_status, '') IN ('skipped', 'failed'))"], []
         for column, value in (("camera_id", camera_id), ("event_type", event_type), ("label", label)):
             if value:
                 clauses.append(f"{column}=?")
                 args.append(value)
         if unacknowledged:
             clauses.append("acknowledged_at IS NULL")
-        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        where = f" WHERE {' AND '.join(clauses)}"
         rows = self._read(f"SELECT * FROM events{where} ORDER BY occurred_at DESC LIMIT ?", (*args, limit))
         return [self._event(r) for r in rows]
 
@@ -147,4 +153,5 @@ class Store:
 
     @staticmethod
     def _event(row: sqlite3.Row) -> dict[str, Any]:
-        return dict(row) | {"details": json.loads(row["details"])}
+        description = json.loads(row["description"]) if row["description"] else None
+        return dict(row) | {"details": json.loads(row["details"]), "description": description}

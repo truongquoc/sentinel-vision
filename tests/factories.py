@@ -36,4 +36,17 @@ class ZoneRecordFactory(factory.DictFactory):
         "severity": "medium",
         "min_frames": 2,
         "exit_grace_seconds": 2.0,
+        "describe_every_seconds": 0,
+    })
+
+
+class DescribedZoneRecordFactory(ZoneRecordFactory):
+    """A zone that asks the AI describer for an activity update every 5 seconds."""
+
+    config = factory.LazyFunction(lambda: {
+        "polygon": [[0, 0.5], [1, 0.5], [1, 1], [0, 1]],
+        "classes": ["person"],
+        "events": ["enter", "loiter"],
+        "loiter_seconds": 12,
+        "describe_every_seconds": 5,
     })
