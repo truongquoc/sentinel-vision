@@ -1,8 +1,116 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sentinel Vision</title><link rel="stylesheet" href="/style.css"></head><body>
-<aside><div class="brand"><span class="mark">◈</span><span>SENTINEL<br><b>VISION</b></span></div><nav><a class="active">Overview</a><a>Live cameras</a><a>Event ledger</a><a>Detection rules</a></nav><div class="edge">EDGE NODE<br><b id="edge">Checking…</b></div></aside>
-<main><header><div><p class="eyebrow">OPERATIONS CENTER</p><h1>Security overview</h1><p class="sub">One camera · Local AI processing · <span class="ok">●</span> System armed</p></div><button id="start">Start camera</button></header>
-<section class="metrics"><article><label>CAMERA STATE</label><strong id="cameraState">—</strong><small id="cameraMeta">Awaiting source</small></article><article><label>EVENTS TODAY</label><strong id="eventCount">0</strong><small>Persistent event ledger</small></article><article><label>DETECTION MODE</label><strong id="detectorState">Checking…</strong><small id="detectorMeta">Pluggable inference pipeline</small></article></section>
-<section class="grid"><article class="live panel"><div class="panel-head"><div><p class="eyebrow">LIVE FEED</p><h2>Front entrance</h2></div><span class="badge" id="feedState">OFFLINE</span></div><div class="video"><img id="feed" alt="Live camera feed"><div class="no-feed" id="empty"><span>◉</span><p id="emptyTitle">Camera stream unavailable</p><small id="emptyDetail">Waiting for camera connection</small></div></div></article>
-<article class="panel rules"><div class="panel-head"><div><p class="eyebrow">ACTIVE AUTOMATION</p><h2>Detection rules</h2></div><button class="text" id="addRule">+ Add rule</button></div><div id="ruleList"></div></article></section>
-<section class="panel events"><div class="panel-head"><div><p class="eyebrow">AUDITABLE TIMELINE</p><h2>Recent events</h2></div><button class="text" id="refresh">Refresh</button></div><div id="eventList" class="event-list"><p class="muted">No events recorded yet.</p></div></section>
-</main><dialog id="dialog"><form method="dialog"><h2>Create zone rule</h2><label>Name<input name="name" required value="After-hours entry"></label><label>Classes (comma separated)<input name="classes" value="person"></label><label>Polygon (normalized JSON)<textarea name="polygon">[[0.1,0.1],[0.9,0.1],[0.9,0.9],[0.1,0.9]]</textarea></label><menu><button value="cancel">Cancel</button><button value="submit" id="saveRule">Save rule</button></menu></form></dialog><script src="/app.js"></script></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sentinel Vision</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<aside>
+  <div class="brand"><span class="mark">◈</span><span>SENTINEL<br><b>VISION</b></span></div>
+  <nav>
+    <a href="#live" class="active">Live camera</a>
+    <a href="#rules">Zones &amp; rules</a>
+    <a href="#events">Event ledger</a>
+  </nav>
+  <div class="edge">EDGE NODE<br><b id="edge" data-testid="edge-status">Checking…</b></div>
+</aside>
+
+<main>
+  <header>
+    <div>
+      <p class="eyebrow">OPERATIONS CENTER</p>
+      <h1 id="cameraName">Security overview</h1>
+      <p class="sub" id="subline">Local AI processing</p>
+    </div>
+    <button id="start" data-testid="camera-start">Start camera</button>
+  </header>
+
+  <section class="metrics">
+    <article><label>CAMERA</label><strong id="cameraState" data-testid="camera-state">—</strong><small id="cameraMeta">Awaiting source</small></article>
+    <article><label>DETECTOR</label><strong id="detectorState" data-testid="detector-state">—</strong><small id="detectorMeta">Checking…</small></article>
+    <article><label>PIPELINE</label><strong id="pipelineState" data-testid="pipeline-state">—</strong><small id="pipelineMeta">fps · inference latency</small></article>
+    <article><label>EVENTS TODAY</label><strong id="eventCount" data-testid="events-today">0</strong><small id="notifierMeta">Webhook disabled</small></article>
+  </section>
+
+  <section class="grid">
+    <article class="live panel" id="live">
+      <div class="panel-head">
+        <div><p class="eyebrow">LIVE FEED</p><h2>Detections &amp; zones</h2></div>
+        <div class="actions">
+          <label class="toggle"><input type="checkbox" id="showZones" checked data-testid="toggle-zones"> Zones</label>
+          <button class="ghost" id="drawZone" data-testid="zone-draw">+ Draw zone</button>
+          <span class="badge" id="feedState" data-testid="feed-state">OFFLINE</span>
+        </div>
+      </div>
+      <div class="drawbar" id="drawbar" hidden data-testid="zone-drawbar">
+        <span>Click on the image to place corners of the zone. Objects count as inside when their <b>feet</b> are inside.</span>
+        <span class="spacer"></span>
+        <button class="ghost" id="undoPoint" data-testid="zone-undo">Undo</button>
+        <button class="ghost" id="cancelDraw" data-testid="zone-cancel">Cancel</button>
+        <button id="finishDraw" data-testid="zone-finish" disabled>Finish (0)</button>
+      </div>
+      <div class="video" id="video">
+        <img id="feed" alt="Live camera feed" data-testid="live-feed">
+        <svg id="overlay" viewBox="0 0 1 1" preserveAspectRatio="none" data-testid="zone-overlay"></svg>
+        <div class="no-feed" id="empty"><span>◉</span><p>Camera stream unavailable</p><small id="emptyDetail">Waiting for camera connection</small></div>
+      </div>
+    </article>
+
+    <article class="panel rules" id="rules">
+      <div class="panel-head"><div><p class="eyebrow">ACTIVE AUTOMATION</p><h2>Zones &amp; rules</h2></div></div>
+      <div id="ruleList" data-testid="rule-list"></div>
+    </article>
+  </section>
+
+  <section class="panel events" id="events">
+    <div class="panel-head">
+      <div><p class="eyebrow">AUDITABLE TIMELINE</p><h2>Recent events</h2></div>
+      <div class="filters">
+        <select id="filterType" data-testid="filter-type">
+          <option value="">All events</option>
+          <option value="zone_enter">Entered zone</option>
+          <option value="loitering">Loitering</option>
+          <option value="zone_exit">Left zone</option>
+        </select>
+        <select id="filterLabel" data-testid="filter-label"><option value="">All objects</option></select>
+        <label class="toggle"><input type="checkbox" id="filterUnacked" data-testid="filter-unacked"> Unacknowledged</label>
+      </div>
+    </div>
+    <div id="eventList" class="event-list" data-testid="event-list"><p class="muted">No events recorded yet.</p></div>
+  </section>
+</main>
+
+<dialog id="ruleDialog" data-testid="rule-dialog">
+  <form method="dialog" id="ruleForm">
+    <h2 id="ruleDialogTitle">New zone</h2>
+    <label>Name<input name="name" required maxlength="80" autocomplete="off" data-1p-ignore data-testid="rule-name"></label>
+    <fieldset><legend>Watch for</legend><div class="chips" id="classChips"></div></fieldset>
+    <fieldset><legend>Create an event when an object…</legend>
+      <div class="chips">
+        <label><input type="checkbox" name="ev" value="enter" checked data-testid="rule-ev-enter"> enters</label>
+        <label><input type="checkbox" name="ev" value="loiter" checked data-testid="rule-ev-loiter"> stays longer than</label>
+        <label><input type="checkbox" name="ev" value="exit" data-testid="rule-ev-exit"> leaves</label>
+      </div>
+    </fieldset>
+    <div class="row">
+      <label>Loiter after (seconds)<input name="loiter" type="number" min="1" max="3600" value="30" data-testid="rule-loiter"></label>
+      <label>Severity<select name="severity" data-testid="rule-severity"><option>low</option><option selected>medium</option><option>high</option></select></label>
+    </div>
+    <p class="form-error" id="ruleError" data-testid="rule-error"></p>
+    <menu><button value="cancel" formnovalidate class="ghost" data-testid="rule-cancel">Cancel</button><button value="save" id="saveRule" data-testid="rule-save">Save zone</button></menu>
+  </form>
+</dialog>
+
+<dialog id="eventDialog" class="wide" data-testid="event-dialog">
+  <form method="dialog">
+    <img id="eventImage" alt="Event snapshot">
+    <div id="eventInfo"></div>
+    <menu><button value="close" data-testid="event-close">Close</button></menu>
+  </form>
+</dialog>
+
+<script src="/app.js"></script>
+</body>
+</html>
