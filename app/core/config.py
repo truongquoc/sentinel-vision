@@ -46,6 +46,7 @@ class Settings:
     describer: str = field(default_factory=lambda: _env("DESCRIBER", "ollama"))
     ollama_url: str = field(default_factory=lambda: _env("OLLAMA_URL", "http://localhost:11434"))
     vlm_model: str = field(default_factory=lambda: _env("VLM_MODEL", "qwen3-vl:8b"))
+    ollama_num_ctx: int = field(default_factory=lambda: int(_env("OLLAMA_NUM_CTX", "8192")))
     describe_timeout_seconds: float = field(default_factory=lambda: float(_env("DESCRIBE_TIMEOUT_SECONDS", "60")))
     notify_wait_seconds: float = field(default_factory=lambda: float(_env("NOTIFY_WAIT_SECONDS", "20")))
     webhook_url: str = field(default_factory=lambda: _env("WEBHOOK_URL", ""))

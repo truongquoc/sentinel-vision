@@ -139,9 +139,12 @@ class OllamaDescriber:
     enabled = True
     STATUS_TTL_SECONDS = 30.0
 
-    def __init__(self, base_url: str, model: str, timeout_seconds: float = 60.0, transport: httpx.BaseTransport | None = None) -> None:
+    def __init__(self, base_url: str, model: str, timeout_seconds: float = 60.0, num_ctx: int = 8192,
+                 transport: httpx.BaseTransport | None = None) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
+        # Ollama defaults to a 4096-token context, which two images plus the prompt can exceed.
+        self.num_ctx = num_ctx
         self._client = httpx.Client(base_url=self.base_url, timeout=timeout_seconds, transport=transport)
         self._status: dict[str, Any] | None = None
         self._status_at = 0.0
@@ -171,7 +174,7 @@ class OllamaDescriber:
             "stream": False,
             "format": OUTPUT_SCHEMA,
             "keep_alive": "30m",
-            "options": {"temperature": 0.2},
+            "options": {"temperature": 0.2, "num_ctx": self.num_ctx},
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {
@@ -199,7 +202,7 @@ class OllamaDescriber:
         return response.json().get("message", {}).get("content", "")
 
 
-def make_describer(kind: str, base_url: str, model: str, timeout_seconds: float) -> Describer:
+def make_describer(kind: str, base_url: str, model: str, timeout_seconds: float, num_ctx: int = 8192) -> Describer:
     if kind.lower() != "ollama":
         return NullDescriber()
-    return OllamaDescriber(base_url, model, timeout_seconds)
+    return OllamaDescriber(base_url, model, timeout_seconds, num_ctx)
