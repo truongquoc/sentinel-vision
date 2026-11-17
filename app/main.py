@@ -36,7 +36,8 @@ def create_app(config: Settings = settings, tracker_factory: TrackerFactory | No
         store.upsert_camera(config.camera_id, config.camera_name, config.camera_rtsp_url)
         notifier = WebhookNotifier(config.webhook_url, config.webhook_secret)
         notifier.start()
-        vlm = describer or make_describer(config.describer, config.ollama_url, config.vlm_model, config.describe_timeout_seconds)
+        vlm = describer or make_describer(config.describer, config.ollama_url, config.vlm_model, config.describe_timeout_seconds,
+                                         config.ollama_num_ctx)
         descriptions = DescriptionService(vlm, store, notifier, config.notify_wait_seconds)
         descriptions.start()
         engine = SurveillanceEngine(store, notifier, config, tracker_factory, descriptions)
