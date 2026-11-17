@@ -1,6 +1,7 @@
 import base64
 import json
 
+import cv2
 import httpx
 import numpy as np
 import pytest
@@ -74,6 +75,20 @@ def test_ollama_sends_both_images_and_schema():
     user = seen["messages"][1]
     assert user["images"] == [base64.b64encode(b"crop-bytes").decode(), base64.b64encode(b"frame-bytes").decode()]
     assert seen["format"] == OUTPUT_SCHEMA and seen["stream"] is False
+
+
+def test_ollama_requests_context_large_enough_for_two_images():
+    # Ollama's default 4096-token context overflows with two images + prompt ("request (4241 tokens) exceeds...").
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, json={"message": {"content": json.dumps(MODEL_REPLY)}})
+
+    OllamaDescriber("http://ollama.test", "m", num_ctx=12288, transport=httpx.MockTransport(handler)).describe(make_request())
+    assert seen["options"]["num_ctx"] == 12288
+    ollama(handler).describe(make_request())
+    assert seen["options"]["num_ctx"] == 8192
 
 
 def test_ollama_missing_model_explains_fix():
@@ -266,6 +281,20 @@ def test_pipeline_queues_description_with_crop_and_context(store, tmp_path):
     [request] = describer.requests
     assert request.zone_name == "Front gate" and request.crop_jpeg[:2] == b"\xff\xd8" and request.frame_jpeg[:2] == b"\xff\xd8"
     assert notifier.sent[0]["description"]["summary"] == MODEL_REPLY["summary"]
+
+
+def test_pipeline_caps_crop_size_so_image_tokens_stay_bounded(store, tmp_path):
+    store.add_rule(DescribedZoneRecordFactory(id="r1"))
+    person = TrackFactory(track_id=3, box=(100.0, 0.0, 1700.0, 2100.0))  # huge box on a 4K frame
+    describer = FakeDescriber()
+    svc, _ = service(store, describer)
+    pipeline, _ = make_pipeline(store, tmp_path, ScriptedTracker([[person], [person]]), svc)
+    frame = np.full((2160, 3840, 3), 90, dtype=np.uint8)
+    pipeline._process(frame, T0)
+    pipeline._process(frame, T0 + 0.1)
+    svc.process_next(wait_seconds=0)
+    crop_img = cv2.imdecode(np.frombuffer(describer.requests[0].crop_jpeg, np.uint8), cv2.IMREAD_COLOR)
+    assert max(crop_img.shape[:2]) <= 512
 
 
 def test_pipeline_exit_event_has_no_crop_and_is_not_described(store, tmp_path):

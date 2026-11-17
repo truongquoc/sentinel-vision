@@ -31,14 +31,17 @@ log = get_logger(__name__)
 
 TrackerFactory = Callable[[], ObjectTracker]
 JPEG_QUALITY = [cv2.IMWRITE_JPEG_QUALITY, 80]
-CONTEXT_MAX_WIDTH = 768  # full-frame context image for the VLM; detail comes from the crop
+# Image size drives VLM token cost: both images plus the prompt must fit the model's context window.
+CONTEXT_MAX_SIDE = 768  # full-frame context image; detail comes from the crop
+CROP_MAX_SIDE = 512
 
 
-def downscale(image: np.ndarray, max_width: int) -> np.ndarray:
+def fit_within(image: np.ndarray, max_side: int) -> np.ndarray:
     height, width = image.shape[:2]
-    if width <= max_width:
+    scale = max_side / max(height, width)
+    if scale >= 1:
         return image
-    return cv2.resize(image, (max_width, int(height * max_width / width)), interpolation=cv2.INTER_AREA)
+    return cv2.resize(image, (max(1, round(width * scale)), max(1, round(height * scale))), interpolation=cv2.INTER_AREA)
 
 
 def encode_jpeg(image: np.ndarray) -> bytes | None:
@@ -160,6 +163,8 @@ class CameraPipeline:
             snapshot = draw_highlight(snapshot, candidate.box, f"{candidate.label} #{candidate.track_id}")
         snapshot_path = self._write_media(f"{event_id}.jpg", snapshot)
         thumbnail = crop(raw, candidate.box) if present else None
+        if thumbnail is not None:
+            thumbnail = fit_within(thumbnail, CROP_MAX_SIDE)
         thumbnail_path = self._write_media(f"{event_id}_thumb.jpg", thumbnail) if thumbnail is not None else None
         describe = describing and thumbnail_path is not None
         event = {
@@ -189,7 +194,7 @@ class CameraPipeline:
 
     def _request_description(self, event: dict[str, Any], candidate: EventCandidate, thumbnail: np.ndarray, raw: np.ndarray) -> None:
         crop_jpeg = encode_jpeg(thumbnail)
-        frame_jpeg = encode_jpeg(downscale(raw, CONTEXT_MAX_WIDTH))
+        frame_jpeg = encode_jpeg(fit_within(raw, CONTEXT_MAX_SIDE))
         if crop_jpeg is None or frame_jpeg is None:
             self.store.set_description(event["id"], "failed", {"error": "Could not encode images"})
             self.notifier.enqueue(event)
